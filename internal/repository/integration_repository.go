@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jaybani/jb_cip/internal/domain"
+	"github.com/lib/pq"
 )
 
 type IntegrationRepository struct {
@@ -85,7 +86,7 @@ func (r *IntegrationRepository) CreateConnection(conn *domain.APIConnection) err
 		RETURNING id, created_at, updated_at
 	`
 	return r.db.QueryRow(query, conn.UserID, conn.WorkspaceID, conn.Provider,
-		conn.ProviderUserID, pqArray(&conn.Scopes)).Scan(&conn.ID, &conn.CreatedAt, &conn.UpdatedAt)
+		conn.ProviderUserID, pq.Array(conn.Scopes)).Scan(&conn.ID, &conn.CreatedAt, &conn.UpdatedAt)
 }
 
 func (r *IntegrationRepository) SaveToken(token *domain.APIToken) error {
@@ -103,7 +104,7 @@ func (r *IntegrationRepository) SaveToken(token *domain.APIToken) error {
 	`
 	_, err := r.db.Exec(query, token.ConnectionID, token.AccessTokenEncrypted,
 		token.RefreshTokenEncrypted, token.AccessTokenExpiresAt,
-		token.RefreshTokenExpiresAt, pqArray(&token.Scope))
+		token.RefreshTokenExpiresAt, pq.Array(token.Scope))
 	return err
 }
 
@@ -156,7 +157,7 @@ func (r *IntegrationRepository) SaveChannels(channels []*domain.YouTubeChannel) 
 			INSERT INTO analytics.channels (workspace_id, connection_id, platform_id, external_id, name, description,
 				subscriber_count, view_count, video_count, status)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active')
-			ON CONFLICT (workspace_id, external_id) DO UPDATE
+			ON CONFLICT (workspace_id, external_id) WHERE deleted_at IS NULL DO UPDATE
 			SET name = EXCLUDED.name, description = EXCLUDED.description,
 				subscriber_count = EXCLUDED.subscriber_count, view_count = EXCLUDED.view_count,
 				video_count = EXCLUDED.video_count, connection_id = EXCLUDED.connection_id
@@ -197,4 +198,13 @@ func (r *IntegrationRepository) GetChannels(workspaceID string) ([]*domain.YouTu
 		channels = append(channels, ch)
 	}
 	return channels, nil
+}
+
+func (r *IntegrationRepository) GetPlatformID(code string) (string, error) {
+	query := `SELECT id FROM analytics.platforms WHERE code = $1 AND deleted_at IS NULL ORDER BY created_at LIMIT 1`
+	var id string
+	if err := r.db.QueryRow(query, code).Scan(&id); err != nil {
+		return "", err
+	}
+	return id, nil
 }

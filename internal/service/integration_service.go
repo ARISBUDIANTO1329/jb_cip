@@ -254,13 +254,21 @@ func (s *IntegrationService) GetYouTubeChannels(userID string) ([]*ChannelRespon
 		return nil, errors.New("INTEGRATION_004", fmt.Sprintf("Failed to fetch channels: %v", err), 500)
 	}
 
+	// Resolve YouTube platform UUID dari analytics.platforms (07_DATABASE_DESIGN.md 3.5)
+	platformID, err := s.integrationRepo.GetPlatformID("youtube")
+	if err != nil {
+		return nil, errors.New("INTEGRATION_005", fmt.Sprintf("YouTube platform not found: %v", err), 500)
+	}
+
 	// Save channels to DB
 	for _, ch := range channels {
 		ch.WorkspaceID = conn.WorkspaceID
 		ch.ConnectionID = conn.ID
-		ch.PlatformID = "google-youtube"
+		ch.PlatformID = platformID
 	}
-	_ = s.integrationRepo.SaveChannels(channels)
+	if err := s.integrationRepo.SaveChannels(channels); err != nil {
+		return nil, errors.New("INTEGRATION_005", fmt.Sprintf("Failed to save channels: %v", err), 500)
+	}
 
 	var result []*ChannelResponse
 	for _, ch := range channels {

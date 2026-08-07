@@ -18,6 +18,9 @@ func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.Au
 	auth.Post("/logout", authHandler.Logout)
 	auth.Post("/refresh", authHandler.Refresh)
 
+	// Google OAuth callback - PUBLIC (identitas dari state, tanpa JWT)
+	api.Get("/integrations/google/callback", intHandler.GoogleCallback)
+
 	protected := api.Group("")
 	protected.Use(middleware.AuthRequired(cfg))
 	protected.Get("/auth/profile", authHandler.Profile)
@@ -37,7 +40,6 @@ func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.Au
 	// Integration routes
 	integrations := protected.Group("/integrations")
 	integrations.Get("/google/login", intHandler.GoogleLogin)
-	integrations.Get("/google/callback", intHandler.GoogleCallback)
 	integrations.Post("/google/disconnect", intHandler.Disconnect)
 	integrations.Post("/google/test", intHandler.TestConnection)
 	integrations.Get("/youtube/channels", intHandler.GetYouTubeChannels)

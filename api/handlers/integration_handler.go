@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/jaybani/jb_cip/internal/helper"
 	"github.com/jaybani/jb_cip/internal/service"
 	"github.com/jaybani/jb_cip/pkg/errors"
@@ -40,24 +44,15 @@ func (h *IntegrationHandler) GoogleLogin(c *fiber.Ctx) error {
 }
 
 func (h *IntegrationHandler) GoogleCallback(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
-
 	code := c.Query("code")
 	if code == "" {
 		return helper.SendError(c, errors.New("VALIDATION_001", "Authorization code is required", 400))
 	}
 
-	var workspaceID string
 	state := c.Query("state")
-	if state != "" {
-		workspaceID = parseState(state)
-	} else {
-		wsRepo := h.integrationService.GetWorkspaceRepo()
-		workspace, err := wsRepo.GetUserWorkspace(userID)
-		if err != nil {
-			return helper.SendError(c, errors.New("WORKSPACE_001", "No workspace found", 404))
-		}
-		workspaceID = workspace.ID
+	userID, workspaceID, err := parseState(state)
+	if err != nil {
+		return helper.SendError(c, errors.New("VALIDATION_002", "Invalid state parameter", 400))
 	}
 
 	resp, err := h.integrationService.GoogleCallback(code, userID, workspaceID)
@@ -112,11 +107,16 @@ func (h *IntegrationHandler) GetYouTubeChannels(c *fiber.Ctx) error {
 	return helper.SendSuccess(c, "YouTube channels retrieved", channels, nil)
 }
 
-func parseState(state string) string {
-	for i := len(state) - 1; i >= 0; i-- {
-		if state[i] == ':' {
-			return state[i+1:]
-		}
+func parseState(state string) (string, string, error) {
+	parts := strings.Split(state, ":")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid state format")
 	}
-	return state
+	if _, err := uuid.Parse(parts[0]); err != nil {
+		return "", "", fmt.Errorf("invalid user id in state")
+	}
+	if _, err := uuid.Parse(parts[1]); err != nil {
+		return "", "", fmt.Errorf("invalid workspace id in state")
+	}
+	return parts[0], parts[1], nil
 }
