@@ -145,3 +145,26 @@ type SyncJob struct {
 	CompletedAt     *time.Time `json:"completed_at"`
 	CreatedAt       time.Time  `json:"created_at"`
 }
+
+// DailyMetric represents a daily analytics metric for YouTube channel or video
+type DailyMetric struct {
+	ID                    uuid.UUID  `json:"id"`
+	ChannelID             uuid.UUID  `json:"channel_id"`
+	VideoID               *uuid.UUID `json:"video_id,omitempty"`
+	Date                  string     `json:"date"`
+	MetricType            string     `json:"metric_type"` // 'channel' or 'video'
+	Views                 int64      `json:"views"`
+	WatchTime             int64      `json:"watch_time"`
+	AverageViewDuration   float64    `json:"average_view_duration"`
+	AveragePercentageViewed float64  `json:"average_percentage_viewed"`
+	Impressions           int64      `json:"impressions"`
+	ImpressionCTR         float64    `json:"impression_ctr"`
+	Likes                 int64      `json:"likes"`
+	Comments              int64      `json:"comments"`
+	Shares                int64      `json:"shares"`
+	Subscribers           int64      `json:"subscribers"`
+	ReturningViewers      int64      `json:"returning_viewers"`
+	NewViewers            int64      `json:"new_viewers"`
+	SyncJobID             *uuid.UUID `json:"sync_job_id,omitempty"`
+	SyncedAt              *time.Time `json:"synced_at,omitempty"`
+}
