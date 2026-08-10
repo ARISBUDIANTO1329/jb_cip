@@ -4,6 +4,10 @@ bin/
 *.dll
 *.so
 *.dylib
+cip-api
+
+# Backups
+*.bak
 
 # Go
 *.test
