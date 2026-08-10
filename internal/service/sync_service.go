@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jaybani/jb_cip/config"
 	"github.com/jaybani/jb_cip/internal/domain"
 	"github.com/jaybani/jb_cip/internal/helper"
 	"github.com/jaybani/jb_cip/internal/providers"
@@ -20,7 +19,7 @@ type SyncService struct {
 	channelRepo     *repository.ChannelRepository
 	provider        *providers.YouTubeSyncProvider
 	encryptor       *helper.TokenEncryptor
-	cfg             *config.Config
+	cfg             interface{}
 }
 
 func NewSyncService(
@@ -29,7 +28,7 @@ func NewSyncService(
 	channelRepo *repository.ChannelRepository,
 	provider *providers.YouTubeSyncProvider,
 	encryptor *helper.TokenEncryptor,
-	cfg *config.Config,
+	cfg interface{},
 ) *SyncService {
 	return &SyncService{
 		syncRepo:        syncRepo,
@@ -82,19 +81,16 @@ func (s *SyncService) StartSync(userID, workspaceID, channelID string, syncType 
 		return nil, errors.New("SYNC_001", "Invalid workspace ID", 400)
 	}
 
-	// Get channel
 	channel, err := s.channelRepo.GetByID(channelUUID)
 	if err != nil {
 		return nil, errors.New("SYNC_002", "Channel not found", 404)
 	}
 
-	// Get Google connection and token
 	conn, apiToken, err := s.getActiveConnection(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate channel is connected to the same Google account
 	if channel.ConnectionID == "" {
 		return nil, errors.New("SYNC_005", "Channel is not connected to any Google account", 400)
 	}
@@ -102,7 +98,6 @@ func (s *SyncService) StartSync(userID, workspaceID, channelID string, syncType 
 		return nil, errors.New("SYNC_006", "Channel is not connected to the selected Google account", 400)
 	}
 
-	// Determine sync type and incremental point
 	syncMode := syncType
 	var since *time.Time
 	if syncMode == "incremental" {
@@ -110,33 +105,30 @@ func (s *SyncService) StartSync(userID, workspaceID, channelID string, syncType 
 		if lastSync != nil && lastSync.CompletedAt != nil {
 			since = lastSync.CompletedAt
 		} else {
-			// Fallback to last published video
 			since, _ = s.syncRepo.GetLastVideoPublishedAt(channelUUID)
 		}
 	} else if syncMode == "" {
 		syncMode = "manual"
 	}
 
-	// Create job record
 	job := &domain.SyncJob{
-		ID:          uuid.New(),
-		ChannelID:   channelUUID,
-		UserID:      userUUID,
-		WorkspaceID: workspaceUUID,
-		SyncType:    syncMode,
-		Status:      "running",
-		TotalVideos: 0,
-		TotalSuccess: 0,
-		TotalFailed: 0,
+		ID:              uuid.New(),
+		ChannelID:       channelUUID,
+		UserID:          userUUID,
+		WorkspaceID:     workspaceUUID,
+		SyncType:        syncMode,
+		Status:          "running",
+		TotalVideos:     0,
+		TotalSuccess:    0,
+		TotalFailed:     0,
 		DurationSeconds: 0,
-		StartedAt:   &[]time.Time{time.Now()}[0],
-		CreatedAt:   time.Now(),
+		StartedAt:       &[]time.Time{time.Now()}[0],
+		CreatedAt:       time.Now(),
 	}
 	if err := s.syncRepo.CreateSyncJob(job); err != nil {
 		return nil, errors.New("SYSTEM_001", "Failed to create sync job", 500)
 	}
 
-	// Run sync in goroutine
 	go s.runSync(job, channel.ExternalID, conn, apiToken, since)
 
 	return &SyncResponse{
@@ -154,7 +146,6 @@ func (s *SyncService) StartSync(userID, workspaceID, channelID string, syncType 
 func (s *SyncService) runSync(job *domain.SyncJob, channelExternalID string, conn *domain.APIConnection, apiToken *domain.APIToken, since *time.Time) {
 	startTime := time.Now()
 
-	// Decrypt access token
 	accessToken, err := s.encryptor.Decrypt(apiToken.AccessTokenEncrypted)
 	if err != nil {
 		job.Status = "failed"
@@ -165,8 +156,7 @@ func (s *SyncService) runSync(job *domain.SyncJob, channelExternalID string, con
 		return
 	}
 
-	// Refresh token if needed
-	if apiToken.AccessTokenExpiresAt != nil && apiToken.AccessTokenExpiresAt.Before(time.Now()) {
+	if apiToken.AccessTokenExpiresAt != nil && apiToken.AccessTokenExpiresAt.Before(time.Now().Add(5*time.Minute)) {
 		refreshToken, err := s.encryptor.Decrypt(apiToken.RefreshTokenEncrypted)
 		if err != nil {
 			job.Status = "failed"
@@ -176,13 +166,40 @@ func (s *SyncService) runSync(job *domain.SyncJob, channelExternalID string, con
 			s.syncRepo.UpdateSyncJob(job)
 			return
 		}
-		newToken := s.provider.BuildOAuthToken("", refreshToken, time.Time{})
-		_ = newToken
-		// In real implementation, refresh using google provider
-		_ = conn
+
+		newToken, err := s.provider.GoogleProvider.RefreshToken(refreshToken)
+		if err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to refresh token"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
+
+		accessToken = newToken.AccessToken
+		encryptedAccess, err := s.encryptor.Encrypt(newToken.AccessToken)
+		if err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to encrypt new access token"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
+
+		apiToken.AccessTokenEncrypted = encryptedAccess
+		apiToken.AccessTokenExpiresAt = &newToken.Expiry
+		if err := s.integrationRepo.UpdateToken(apiToken); err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to update token in database"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
 	}
 
-	// Fetch videos from YouTube
 	videos, err := s.provider.GetChannelVideos(accessToken, channelExternalID, since)
 	if err != nil {
 		job.Status = "failed"
@@ -213,7 +230,6 @@ func (s *SyncService) runSync(job *domain.SyncJob, channelExternalID string, con
 	job.CompletedAt = &[]time.Time{time.Now()}[0]
 	s.syncRepo.UpdateSyncJob(job)
 
-	// Update channel last_sync_at and total_video
 	_ = s.channelRepo.UpdateSyncStats(job.ChannelID, job.TotalVideos, time.Now())
 }
 
@@ -222,7 +238,7 @@ func (s *SyncService) getActiveConnection(userID string) (*domain.APIConnection,
 	if err != nil {
 		return nil, nil, errors.New("INTEGRATION_002", "No Google connection found", 404)
 	}
-	if conn.Status != "active" {
+	if conn.Status != "active" && conn.Status != "authorized" {
 		return nil, nil, errors.New("INTEGRATION_003", "Google connection is not active", 400)
 	}
 	apiToken, err := s.integrationRepo.GetToken(conn.ID)
@@ -305,7 +321,6 @@ func (s *SyncService) RetrySync(userID, workspaceID, jobID string) (*SyncRespons
 		return nil, errors.New("SYNC_004", "Only failed jobs can be retried", 400)
 	}
 
-	// Create new retry job based on failed job
 	return s.StartSync(userID, workspaceID, job.ChannelID.String(), job.SyncType)
 }
 
