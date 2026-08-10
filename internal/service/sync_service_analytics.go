@@ -40,7 +40,6 @@ func (s *SyncService) GetDailyMetrics(channelID string, startDate, endDate strin
 
 	var metrics []*domain.DailyMetric
 
-	// If date range specified, use that, otherwise get latest
 	if startDate != "" && endDate != "" {
 		metrics, err = s.syncRepo.GetDailyMetricsByChannelAndDateRange(channelUUID, startDate, endDate, limit)
 	} else {
@@ -71,19 +70,16 @@ func (s *SyncService) SyncAnalytics(userID, workspaceID, channelID string) (*Ana
 		return nil, errors.New("SYNC_001", "Invalid workspace ID", 400)
 	}
 
-	// Get channel
 	channel, err := s.channelRepo.GetByID(channelUUID)
 	if err != nil {
 		return nil, errors.New("SYNC_002", "Channel not found", 404)
 	}
 
-	// Get Google connection and token
 	conn, apiToken, err := s.getActiveConnection(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate channel is connected to the same Google account
 	if channel.ConnectionID == "" {
 		return nil, errors.New("SYNC_005", "Channel is not connected to any Google account", 400)
 	}
@@ -91,44 +87,41 @@ func (s *SyncService) SyncAnalytics(userID, workspaceID, channelID string) (*Ana
 		return nil, errors.New("SYNC_006", "Channel is not connected to the selected Google account", 400)
 	}
 
-	// Create job record
 	job := &domain.SyncJob{
-		ID:            uuid.New(),
-		ChannelID:     channelUUID,
-		UserID:        userUUID,
-		WorkspaceID:   workspaceUUID,
-		SyncType:      "analytics",
-		Status:        "running",
-		TotalVideos:   0,
-		TotalSuccess:  0,
-		TotalFailed:   0,
+		ID:              uuid.New(),
+		ChannelID:       channelUUID,
+		UserID:          userUUID,
+		WorkspaceID:     workspaceUUID,
+		SyncType:        "analytics",
+		Status:          "running",
+		TotalVideos:     0,
+		TotalSuccess:    0,
+		TotalFailed:     0,
 		DurationSeconds: 0,
-		StartedAt:     &[]time.Time{time.Now()}[0],
-		CreatedAt:     time.Now(),
+		StartedAt:       &[]time.Time{time.Now()}[0],
+		CreatedAt:       time.Now(),
 	}
 	if err := s.syncRepo.CreateSyncJob(job); err != nil {
 		return nil, errors.New("SYSTEM_001", "Failed to create sync job", 500)
 	}
 
-	// Run sync in goroutine
 	go s.runAnalyticsSync(job, channel.ExternalID, conn, apiToken)
 
 	return &AnalyticsSyncResponse{
-		JobID:        job.ID.String(),
-		Status:       "running",
-		TotalVideos:  0,
+		JobID:         job.ID.String(),
+		Status:        "running",
+		TotalVideos:   0,
 		TotalChannels: 1,
 		TotalMetrics:  0,
-		TotalSuccess: 0,
-		TotalFailed:  0,
-		Duration:     0,
+		TotalSuccess:  0,
+		TotalFailed:   0,
+		Duration:      0,
 	}, nil
 }
 
 func (s *SyncService) runAnalyticsSync(job *domain.SyncJob, channelExternalID string, conn *domain.APIConnection, apiToken *domain.APIToken) {
 	startTime := time.Now()
 
-	// Decrypt access token
 	accessToken, err := s.encryptor.Decrypt(apiToken.AccessTokenEncrypted)
 	if err != nil {
 		job.Status = "failed"
@@ -139,10 +132,54 @@ func (s *SyncService) runAnalyticsSync(job *domain.SyncJob, channelExternalID st
 		return
 	}
 
-	// Create YouTube Analytics Provider
+	// Refresh token if expired or about to expire (within 5 minutes)
+	if apiToken.AccessTokenExpiresAt != nil && apiToken.AccessTokenExpiresAt.Before(time.Now().Add(5*time.Minute)) {
+		refreshToken, err := s.encryptor.Decrypt(apiToken.RefreshTokenEncrypted)
+		if err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to decrypt refresh token"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
+
+		newToken, err := s.provider.GoogleProvider.RefreshToken(refreshToken)
+		if err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to refresh token"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
+
+		accessToken = newToken.AccessToken
+		encryptedAccess, err := s.encryptor.Encrypt(newToken.AccessToken)
+		if err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to encrypt new access token"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
+
+		apiToken.AccessTokenEncrypted = encryptedAccess
+		apiToken.AccessTokenExpiresAt = &newToken.Expiry
+		if err := s.integrationRepo.UpdateToken(apiToken); err != nil {
+			job.Status = "failed"
+			job.ErrorMessage = "Failed to update token in database"
+			job.DurationSeconds = int(time.Since(startTime).Seconds())
+			job.CompletedAt = &[]time.Time{time.Now()}[0]
+			s.syncRepo.UpdateSyncJob(job)
+			return
+		}
+	}
+
 	ytAnalytics := providers.NewYouTubeAnalyticsProvider(s.provider.GoogleProvider)
 
-	// Sync channel metrics
+	// Channel metrics (always 1 call)
 	channelMetrics, err := ytAnalytics.GetChannelMetrics(accessToken, channelExternalID, "7daysAgo", "today")
 	if err != nil {
 		job.Status = "failed"
@@ -153,7 +190,6 @@ func (s *SyncService) runAnalyticsSync(job *domain.SyncJob, channelExternalID st
 		return
 	}
 
-	// Convert and save channel metrics
 	channelMetricsDomain := ytAnalytics.ConvertToChannelMetrics(job.ChannelID, channelMetrics, &job.ID)
 	channelSuccess := 0
 	channelFailed := 0
@@ -165,7 +201,7 @@ func (s *SyncService) runAnalyticsSync(job *domain.SyncJob, channelExternalID st
 		}
 	}
 
-	// Get all videos for this channel
+	// Get videos for this channel
 	videos, err := s.syncRepo.GetVideosByChannel(job.ChannelID, 500)
 	if err != nil {
 		job.Status = "failed"
@@ -176,19 +212,37 @@ func (s *SyncService) runAnalyticsSync(job *domain.SyncJob, channelExternalID st
 		return
 	}
 
+	job.TotalVideos = len(videos)
+	videoIDMap := make(map[string]uuid.UUID, len(videos))
+	youtubeVideoIDs := make([]string, 0, len(videos))
+	for _, v := range videos {
+		videoIDMap[v.VideoID] = v.ID
+		youtubeVideoIDs = append(youtubeVideoIDs, v.VideoID)
+	}
+
 	videoSuccess := 0
 	videoFailed := 0
+	batchFailed := 0
 
-	// Sync metrics for each video
-	for _, video := range videos {
-		videoMetrics, err := ytAnalytics.GetVideoMetrics(accessToken, video.VideoID, "7daysAgo", "today")
+	// Batch video metrics: max 50 IDs per request
+	for i := 0; i < len(youtubeVideoIDs); i += 50 {
+		end := i + 50
+		if end > len(youtubeVideoIDs) {
+			end = len(youtubeVideoIDs)
+		}
+		batch := youtubeVideoIDs[i:end]
+
+		batchMetrics, err := ytAnalytics.GetVideoMetricsBatch(accessToken, channelExternalID, batch, "7daysAgo", "today")
 		if err != nil {
-			videoFailed++
+			batchFailed++
+			videoFailed += len(batch)
+			job.ErrorMessage = fmt.Sprintf("Batch %d failed (%d videos): %v", batchFailed, len(batch), err)
+			// Continue to next batch rather than failing the entire job
 			continue
 		}
 
-		videoMetricsDomain := ytAnalytics.ConvertToDailyMetrics(video.ID, videoMetrics, &job.ID)
-		for _, m := range videoMetricsDomain {
+		domainMetrics := ytAnalytics.ConvertToDailyMetrics(job.ChannelID, videoIDMap, batchMetrics, &job.ID)
+		for _, m := range domainMetrics {
 			if err := s.syncRepo.UpsertDailyMetric(m); err != nil {
 				videoFailed++
 			} else {

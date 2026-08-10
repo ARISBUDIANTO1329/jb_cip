@@ -95,6 +95,7 @@ func main() {
 
 	app.Get("/health", handlers.HealthCheck(cfg))
 	routes.SetupAPIRoutes(app, cfg, authHandler, wsHandler, intHandler, syncHandler)
+	routes.SetupAnalyticsRoutes(app, cfg, syncHandler)
 
 	app.Use(middleware.NotFound())
 

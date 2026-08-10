@@ -2,13 +2,58 @@ package repository
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jaybani/jb_cip/internal/domain"
 )
 
-// UpsertDailyMetric inserts or updates a daily metric record
+// UpsertDailyMetric inserts or updates a daily metric record.
+// Uses partial unique indexes: video metrics use (channel_id, video_id, date, metric_type),
+// channel metrics use (channel_id, date, metric_type) where video_id IS NULL.
 func (r *SyncRepository) UpsertDailyMetric(metric *domain.DailyMetric) error {
+	now := time.Now()
+
+	if metric.VideoID == nil {
+		// Channel metric: conflict on (channel_id, date, metric_type) WHERE video_id IS NULL
+		query := `
+			INSERT INTO analytics.daily_metrics (
+				id, channel_id, video_id, date, metric_type,
+				views, watch_time, average_view_duration, average_percentage_viewed,
+				impressions, impression_ctr, likes, comments, shares,
+				subscribers, returning_viewers, new_viewers,
+				sync_job_id, synced_at, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+			ON CONFLICT (channel_id, date, metric_type)
+				WHERE video_id IS NULL
+			DO UPDATE SET
+				views = EXCLUDED.views,
+				watch_time = EXCLUDED.watch_time,
+				average_view_duration = EXCLUDED.average_view_duration,
+				average_percentage_viewed = EXCLUDED.average_percentage_viewed,
+				impressions = EXCLUDED.impressions,
+				impression_ctr = EXCLUDED.impression_ctr,
+				likes = EXCLUDED.likes,
+				comments = EXCLUDED.comments,
+				shares = EXCLUDED.shares,
+				subscribers = EXCLUDED.subscribers,
+				returning_viewers = EXCLUDED.returning_viewers,
+				new_viewers = EXCLUDED.new_viewers,
+				sync_job_id = EXCLUDED.sync_job_id,
+				synced_at = NOW(),
+				updated_at = NOW()
+		`
+		_, err := r.db.Exec(query,
+			metric.ID, metric.ChannelID, metric.VideoID, metric.Date, metric.MetricType,
+			metric.Views, metric.WatchTime, metric.AverageViewDuration, metric.AveragePercentageViewed,
+			metric.Impressions, metric.ImpressionCTR, metric.Likes, metric.Comments, metric.Shares,
+			metric.Subscribers, metric.ReturningViewers, metric.NewViewers,
+			metric.SyncJobID, now, now, now,
+		)
+		return err
+	}
+
+	// Video metric: conflict on (channel_id, video_id, date, metric_type) WHERE video_id IS NOT NULL
 	query := `
 		INSERT INTO analytics.daily_metrics (
 			id, channel_id, video_id, date, metric_type,
@@ -16,8 +61,10 @@ func (r *SyncRepository) UpsertDailyMetric(metric *domain.DailyMetric) error {
 			impressions, impression_ctr, likes, comments, shares,
 			subscribers, returning_viewers, new_viewers,
 			sync_job_id, synced_at, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())
-		ON CONFLICT (channel_id, video_id, date, metric_type) DO UPDATE SET
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		ON CONFLICT (channel_id, video_id, date, metric_type)
+			WHERE video_id IS NOT NULL
+		DO UPDATE SET
 			views = EXCLUDED.views,
 			watch_time = EXCLUDED.watch_time,
 			average_view_duration = EXCLUDED.average_view_duration,
@@ -39,7 +86,7 @@ func (r *SyncRepository) UpsertDailyMetric(metric *domain.DailyMetric) error {
 		metric.Views, metric.WatchTime, metric.AverageViewDuration, metric.AveragePercentageViewed,
 		metric.Impressions, metric.ImpressionCTR, metric.Likes, metric.Comments, metric.Shares,
 		metric.Subscribers, metric.ReturningViewers, metric.NewViewers,
-		metric.SyncJobID,
+		metric.SyncJobID, now, now, now,
 	)
 	return err
 }

@@ -3,8 +3,8 @@ package providers
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +16,7 @@ type YouTubeAnalyticsProvider struct {
 }
 
 type YouTubeVideoMetric struct {
+	VideoID             string  `json:"video_id"`
 	Date                string  `json:"date"`
 	Views               int64   `json:"views"`
 	WatchTime           int64   `json:"watchTime"`
@@ -37,68 +38,185 @@ type YouTubeChannelMetric struct {
 	NewViewers       int64   `json:"newViewers"`
 }
 
+// YouTubeAnalyticsReport represents v2 API response
+type YouTubeAnalyticsReport struct {
+	ColumnHeaders []struct {
+		Name      string `json:"name"`
+		ColumnType string `json:"columnType"`
+		DataType   string `json:"dataType"`
+	} `json:"columnHeaders"`
+	Rows [][]interface{} `json:"rows"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
 func NewYouTubeAnalyticsProvider(gp *GoogleProvider) *YouTubeAnalyticsProvider {
 	return &YouTubeAnalyticsProvider{googleProvider: gp}
 }
 
-// GetVideoMetrics fetches YouTube Analytics for a specific video
-func (p *YouTubeAnalyticsProvider) GetVideoMetrics(accessToken, videoID string, startDate, endDate string) ([]*YouTubeVideoMetric, error) {
-	metrics := "views,watchTime,averageViewDuration,percentageViewed,impressions,impressionCTR,likes,comments,shares"
+// queryV2 executes a YouTube Analytics API v2 query and returns the report
+func (p *YouTubeAnalyticsProvider) queryV2(accessToken, channelID string, dimensions, metrics, filters, startDate, endDate string, maxResults, startIndex int) (*YouTubeAnalyticsReport, error) {
+	// Build query parameters
+	params := fmt.Sprintf("ids=channel==%s&startDate=%s&endDate=%s&dimensions=%s&metrics=%s&maxResults=%d&startIndex=%d",
+		channelID, startDate, endDate, dimensions, metrics, maxResults, startIndex)
+	if filters != "" {
+		params += "&filters=" + filters
+	}
 
-	url := fmt.Sprintf(
-		"https://www.googleapis.com/youtube/analytics/v1/query?ids=channel==%s&metrics=%s&dimensions=date&start-date=%s&end-date=%s&filters=video==%s&access_token=%s",
-		videoID, metrics, startDate, endDate, videoID, accessToken,
-	)
-
-	resp, err := http.Get(url)
+	url := "https://youtubeanalytics.googleapis.com/v2/reports?" + params
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch video metrics: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Rows [][]string `json:"rows"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Check HTTP status first
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("YouTube Analytics API v2 error (HTTP %d): %s", resp.StatusCode, string(body[:min(500, len(body))]))
+	}
+
+	var report YouTubeAnalyticsReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("failed to decode JSON response: %w", err)
+	}
+
+	if report.Error != nil {
+		return nil, fmt.Errorf("YouTube Analytics API v2 error (code %d): %s", report.Error.Code, report.Error.Message)
+	}
+
+	return &report, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// ConvertRelativeDate converts special date values to ISO format
+// 7daysAgo -> today minus 6 days (7 day range)
+// today -> current date
+func ConvertRelativeDate(dateStr string) string {
+	if dateStr == "7daysAgo" {
+		return time.Now().AddDate(0, 0, -6).Format("2006-01-02")
+	}
+	if dateStr == "today" {
+		return time.Now().Format("2006-01-02")
+	}
+	return dateStr
+}
+
+// GetVideoMetricsBatch fetches YouTube Analytics for up to 50 videos in a single call.
+// Uses API v2 with dimensions=video,date and filters=video==id1,id2,...
+func (p *YouTubeAnalyticsProvider) GetVideoMetricsBatch(accessToken, channelID string, videoIDs []string, startDate, endDate string) ([]*YouTubeVideoMetric, error) {
+	if len(videoIDs) == 0 {
+		return nil, nil
+	}
+	if len(videoIDs) > 50 {
+		return nil, fmt.Errorf("batch size exceeds 50 videos")
+	}
+
+	// Build filters: video==id1,id2,...
+	filters := "video==" + joinStrings(videoIDs, ",")
+
+	// Convert relative dates to ISO format
+	startDate = ConvertRelativeDate(startDate)
+	endDate = ConvertRelativeDate(endDate)
+
+	// Metrics supported in v2 for video reports with youtube.readonly scope
+	metrics := "views,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,likes,comments,shares"
+
+	report, err := p.queryV2(accessToken, channelID, "video,day", metrics, filters, startDate, endDate, 500, 0)
+	if err != nil {
 		return nil, err
 	}
 
-	if result.Error != nil {
-		return nil, fmt.Errorf("YouTube Analytics API error: %s", result.Error.Message)
+	var metricsList []*YouTubeVideoMetric
+
+	// Map column indices
+	headerMap := make(map[string]int)
+	for i, h := range report.ColumnHeaders {
+		headerMap[h.Name] = i
 	}
 
-	var metricsList []*YouTubeVideoMetric
-	for _, row := range result.Rows {
-		if len(row) < 10 {
+	for _, row := range report.Rows {
+		videoIdx := headerMap["video"]
+		dayIdx := headerMap["day"]
+
+		if videoIdx < 0 || dayIdx < 0 || videoIdx >= len(row) || dayIdx >= len(row) {
 			continue
 		}
 
-		views, _ := strconv.ParseInt(row[1], 10, 64)
-		watchTime, _ := strconv.ParseInt(row[2], 10, 64)
-		avgDuration, _ := strconv.ParseFloat(row[3], 64)
-		pctViewed, _ := strconv.ParseFloat(row[4], 64)
-		impressions, _ := strconv.ParseInt(row[5], 10, 64)
-		ctr, _ := strconv.ParseFloat(row[6], 64)
-		likes, _ := strconv.ParseInt(row[7], 10, 64)
-		comments, _ := strconv.ParseInt(row[8], 10, 64)
-		shares, _ := strconv.ParseInt(row[9], 10, 64)
+		videoID, _ := row[videoIdx].(string)
+		dateStr, _ := row[dayIdx].(string)
 
-		metricsList = append(metricsList, &YouTubeVideoMetric{
-			Date:                row[0],
-			Views:               views,
-			WatchTime:           watchTime,
-			AverageViewDuration: avgDuration,
-			PercentageViewed:    pctViewed,
-			Impressions:         impressions,
-			ImpressionCTR:       ctr,
-			Likes:               likes,
-			Comments:            comments,
-			Shares:              shares,
-		})
+		metric := &YouTubeVideoMetric{
+			VideoID: videoID,
+			Date:    dateStr,
+		}
+
+		// Parse metrics safely with nil checks
+		if idx, ok := headerMap["views"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Views = int64(v)
+			}
+		}
+		if idx, ok := headerMap["estimatedMinutesWatched"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.WatchTime = int64(v)
+			}
+		}
+		if idx, ok := headerMap["averageViewDuration"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.AverageViewDuration = v
+			}
+		}
+		if idx, ok := headerMap["averageViewPercentage"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.PercentageViewed = v
+			}
+		}
+		if idx, ok := headerMap["impressions"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Impressions = int64(v)
+			}
+		}
+		if idx, ok := headerMap["impressionsClickThroughRate"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.ImpressionCTR = v
+			}
+		}
+		if idx, ok := headerMap["likes"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Likes = int64(v)
+			}
+		}
+		if idx, ok := headerMap["comments"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Comments = int64(v)
+			}
+		}
+		if idx, ok := headerMap["shares"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Shares = int64(v)
+			}
+		}
+
+		metricsList = append(metricsList, metric)
 	}
 
 	return metricsList, nil
@@ -106,62 +224,75 @@ func (p *YouTubeAnalyticsProvider) GetVideoMetrics(accessToken, videoID string, 
 
 // GetChannelMetrics fetches YouTube Analytics for a channel
 func (p *YouTubeAnalyticsProvider) GetChannelMetrics(accessToken, channelID string, startDate, endDate string) ([]*YouTubeChannelMetric, error) {
-	metrics := "subscribers,views,watchTime,returningViewerCount,newViewerCount"
+	// Convert relative dates to ISO format
+	startDate = ConvertRelativeDate(startDate)
+	endDate = ConvertRelativeDate(endDate)
 
-	url := fmt.Sprintf(
-		"https://www.googleapis.com/youtube/analytics/v1/query?ids=channel==%s&metrics=%s&dimensions=date&start-date=%s&end-date=%s&access_token=%s",
-		channelID, metrics, startDate, endDate, accessToken,
-	)
+	// Metrics supported in v2 for channel reports
+	metrics := "views,estimatedMinutesWatched,subscribersGained,subscribersLost"
 
-	resp, err := http.Get(url)
+	report, err := p.queryV2(accessToken, channelID, "day", metrics, "", startDate, endDate, 500, 0)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch channel metrics: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Rows [][]string `json:"rows"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	if result.Error != nil {
-		return nil, fmt.Errorf("YouTube Analytics API error: %s", result.Error.Message)
+	var metricsList []*YouTubeChannelMetric
+
+	// Map column indices
+	headerMap := make(map[string]int)
+	for i, h := range report.ColumnHeaders {
+		headerMap[h.Name] = i
 	}
 
-	var metricsList []*YouTubeChannelMetric
-	for _, row := range result.Rows {
-		if len(row) < 6 {
+	for _, row := range report.Rows {
+		dayIdx := headerMap["day"]
+		if dayIdx < 0 || dayIdx >= len(row) {
 			continue
 		}
+		dateStr, _ := row[dayIdx].(string)
 
-		subscribers, _ := strconv.ParseInt(row[1], 10, 64)
-		views, _ := strconv.ParseInt(row[2], 10, 64)
-		watchTime, _ := strconv.ParseInt(row[3], 10, 64)
-		returningViewers, _ := strconv.ParseInt(row[4], 10, 64)
-		newViewers, _ := strconv.ParseInt(row[5], 10, 64)
+		metric := &YouTubeChannelMetric{
+			Date: dateStr,
+		}
 
-		metricsList = append(metricsList, &YouTubeChannelMetric{
-			Date:             row[0],
-			Subscribers:      subscribers,
-			Views:            views,
-			WatchTime:        watchTime,
-			ReturningViewers: returningViewers,
-			NewViewers:       newViewers,
-		})
+		if idx, ok := headerMap["views"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Views = int64(v)
+			}
+		}
+		if idx, ok := headerMap["estimatedMinutesWatched"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.WatchTime = int64(v)
+			}
+		}
+		if idx, ok := headerMap["subscribersGained"]; ok && idx < len(row) {
+			if v, ok := row[idx].(float64); ok {
+				metric.Subscribers = int64(v)
+			}
+		}
+
+		metricsList = append(metricsList, metric)
 	}
 
 	return metricsList, nil
 }
 
-// ConvertToDailyMetrics converts YouTube Video Metrics to domain model
+func joinStrings(strs []string, sep string) string {
+	result := ""
+	for i, s := range strs {
+		if i > 0 {
+			result += sep
+		}
+		result += s
+	}
+	return result
+}
+
+// ConvertToDailyMetrics converts batched YouTube Video Metrics to domain model.
+// channelID is the internal analytics.channels.id. videoIDMap maps YouTube video_id to internal youtube_videos.id.
 func (p *YouTubeAnalyticsProvider) ConvertToDailyMetrics(
-	videoID uuid.UUID,
+	channelID uuid.UUID,
+	videoIDMap map[string]uuid.UUID,
 	metricsList []*YouTubeVideoMetric,
 	syncJobID *uuid.UUID,
 ) []*domain.DailyMetric {
@@ -169,23 +300,27 @@ func (p *YouTubeAnalyticsProvider) ConvertToDailyMetrics(
 	now := time.Now()
 
 	for _, m := range metricsList {
+		videoUUID, ok := videoIDMap[m.VideoID]
+		if !ok {
+			continue
+		}
 		metrics = append(metrics, &domain.DailyMetric{
-			ID:                    uuid.New(),
-			ChannelID:             videoID,
-			VideoID:               &videoID,
-			Date:                  m.Date,
-			MetricType:            "video",
-			Views:                 m.Views,
-			WatchTime:             m.WatchTime,
-			AverageViewDuration:   m.AverageViewDuration,
+			ID:                      uuid.New(),
+			ChannelID:               channelID,
+			VideoID:                 &videoUUID,
+			Date:                    m.Date,
+			MetricType:              "video",
+			Views:                   m.Views,
+			WatchTime:               m.WatchTime,
+			AverageViewDuration:     m.AverageViewDuration,
 			AveragePercentageViewed: m.PercentageViewed,
-			Impressions:           m.Impressions,
-			ImpressionCTR:         m.ImpressionCTR,
-			Likes:                 m.Likes,
-			Comments:              m.Comments,
-			Shares:                m.Shares,
-			SyncJobID:             syncJobID,
-			SyncedAt:              &now,
+			Impressions:             m.Impressions,
+			ImpressionCTR:           m.ImpressionCTR,
+			Likes:                   m.Likes,
+			Comments:                m.Comments,
+			Shares:                  m.Shares,
+			SyncJobID:               syncJobID,
+			SyncedAt:                &now,
 		})
 	}
 
@@ -203,18 +338,18 @@ func (p *YouTubeAnalyticsProvider) ConvertToChannelMetrics(
 
 	for _, m := range metricsList {
 		metrics = append(metrics, &domain.DailyMetric{
-			ID:                    uuid.New(),
-			ChannelID:             channelID,
-			VideoID:               nil,
-			Date:                  m.Date,
-			MetricType:            "channel",
-			Views:                 m.Views,
-			WatchTime:             m.WatchTime,
-			Subscribers:           m.Subscribers,
-			ReturningViewers:      m.ReturningViewers,
-			NewViewers:            m.NewViewers,
-			SyncJobID:             syncJobID,
-			SyncedAt:              &now,
+			ID:                 uuid.New(),
+			ChannelID:          channelID,
+			VideoID:            nil,
+			Date:               m.Date,
+			MetricType:         "channel",
+			Views:              m.Views,
+			WatchTime:          m.WatchTime,
+			Subscribers:        m.Subscribers,
+			ReturningViewers:   m.ReturningViewers,
+			NewViewers:         m.NewViewers,
+			SyncJobID:          syncJobID,
+			SyncedAt:           &now,
 		})
 	}
 
