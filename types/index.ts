@@ -10,7 +10,6 @@ export interface User {
   updated_at: string;
 }
 
-
 export interface Workspace {
   id: string;
   owner_id: string;
@@ -139,6 +138,22 @@ export interface SyncResponse {
   duration_seconds: number;
   sync_type: string;
   channel_id: string;
+}
+
+export interface AnalyticsSyncResponse {
+  job_id: string;
+  status: string;
+  total_videos: number;
+  total_channels: number;
+  total_metrics: number;
+  total_success: number;
+  total_failed: number;
+  duration_seconds: number;
+  error_message?: string;
+}
+
+export interface SyncHistoryData {
+  jobs: SyncJob[];
 }
 
 export interface AnalyticsSummary {
