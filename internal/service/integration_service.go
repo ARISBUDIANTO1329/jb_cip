@@ -270,8 +270,14 @@ func (s *IntegrationService) GetYouTubeChannels(userID string) ([]*ChannelRespon
 		return nil, errors.New("INTEGRATION_005", fmt.Sprintf("Failed to save channels: %v", err), 500)
 	}
 
+	// Fetch channels from DB to get internal UUID (analytics.channels.id)
+	dbChannels, err := s.integrationRepo.GetChannels(conn.WorkspaceID)
+	if err != nil {
+		return nil, errors.New("INTEGRATION_005", fmt.Sprintf("Failed to load channels: %v", err), 500)
+	}
+
 	var result []*ChannelResponse
-	for _, ch := range channels {
+	for _, ch := range dbChannels {
 		result = append(result, &ChannelResponse{
 			ID:              ch.ID,
 			ExternalID:      ch.ExternalID,
