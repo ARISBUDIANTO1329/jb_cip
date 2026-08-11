@@ -77,6 +77,9 @@ func main() {
 	baseURL := fmt.Sprintf("http://%s:%s", cfg.App.Host, cfg.App.Port)
 	intHandler := handlers.NewIntegrationHandler(integrationService, baseURL)
 	syncHandler := handlers.NewSyncHandler(syncService)
+	videoHandler := handlers.NewVideoHandler(channelRepo, syncRepo)
+	analyticsReadService := service.NewAnalyticsReadService(channelRepo, syncRepo)
+	analyticsHandler := handlers.NewAnalyticsHandler(analyticsReadService)
 
 	app := fiber.New(fiber.Config{
 		AppName:      cfg.App.Name,
@@ -94,7 +97,7 @@ func main() {
 	app.Use(middleware.APIVersion(cfg.App.APIVersion))
 
 	app.Get("/health", handlers.HealthCheck(cfg))
-	routes.SetupAPIRoutes(app, cfg, authHandler, wsHandler, intHandler, syncHandler)
+	routes.SetupAPIRoutes(app, cfg, authHandler, wsHandler, intHandler, syncHandler, videoHandler, analyticsHandler)
 	routes.SetupAnalyticsRoutes(app, cfg, syncHandler)
 
 	app.Use(middleware.NotFound())

@@ -286,3 +286,57 @@ func (r *SyncRepository) GetVideoByID(channelID uuid.UUID, videoID string) (*dom
 	}
 	return video, nil
 }
+
+// GetVideosByChannelWithPagination gets videos with pagination and total count
+func (r *SyncRepository) GetVideosByChannelWithPagination(channelID uuid.UUID, limit, offset int) ([]*domain.YouTubeVideo, int, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	countQuery := `SELECT COUNT(*) FROM analytics.youtube_videos WHERE channel_id = $1`
+	if err := r.db.QueryRow(countQuery, channelID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count videos: %w", err)
+	}
+
+	query := `
+		SELECT id, channel_id, video_id, title, description, published_at,
+			duration, thumbnail_url, privacy_status, view_count,
+			like_count, comment_count, created_at, updated_at
+		FROM analytics.youtube_videos
+		WHERE channel_id = $1
+		ORDER BY published_at DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.db.Query(query, channelID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query videos: %w", err)
+	}
+	defer rows.Close()
+
+	var videos []*domain.YouTubeVideo
+	for rows.Next() {
+		video := &domain.YouTubeVideo{}
+		var publishedAt sql.NullTime
+		if err := rows.Scan(
+			&video.ID, &video.ChannelID, &video.VideoID, &video.Title,
+			&video.Description, &publishedAt, &video.Duration,
+			&video.ThumbnailURL, &video.PrivacyStatus, &video.ViewCount,
+			&video.LikeCount, &video.CommentCount, &video.CreatedAt, &video.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan video: %w", err)
+		}
+		if publishedAt.Valid {
+			video.PublishedAt = &publishedAt.Time
+		}
+		videos = append(videos, video)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("rows iteration error: %w", err)
+	}
+
+	return videos, total, nil
+}

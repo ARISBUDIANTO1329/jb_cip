@@ -7,7 +7,7 @@ import (
 	"github.com/jaybani/jb_cip/config"
 )
 
-func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.AuthHandler, wsHandler *handlers.WorkspaceHandler, intHandler *handlers.IntegrationHandler, syncHandler *handlers.SyncHandler) {
+func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.AuthHandler, wsHandler *handlers.WorkspaceHandler, intHandler *handlers.IntegrationHandler, syncHandler *handlers.SyncHandler, videoHandler *handlers.VideoHandler, analyticsHandler *handlers.AnalyticsHandler) {
 	api := app.Group("/api/" + cfg.App.APIVersion)
 
 	healthHandler := handlers.HealthCheck(cfg)
@@ -52,4 +52,13 @@ func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.Au
 	yt.Get("/sync/history", syncHandler.SyncHistory)
 	yt.Post("/sync/retry", syncHandler.RetrySync)
 	yt.Get("/sync/result", syncHandler.SyncResult)
+
+	// Video read routes
+	yt.Get("/channels/:channel_id/videos", videoHandler.ListVideos)
+	yt.Get("/channels/:channel_id/videos/:video_id", videoHandler.GetVideo)
+
+	// Analytics read routes
+	yt.Get("/analytics/summary", analyticsHandler.Summary)
+	yt.Get("/analytics/timeseries", analyticsHandler.Timeseries)
+	yt.Get("/analytics/top-videos", analyticsHandler.TopVideos)
 }
