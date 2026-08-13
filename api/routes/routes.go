@@ -7,7 +7,7 @@ import (
 	"github.com/jaybani/jb_cip/config"
 )
 
-func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.AuthHandler, wsHandler *handlers.WorkspaceHandler, intHandler *handlers.IntegrationHandler, syncHandler *handlers.SyncHandler, videoHandler *handlers.VideoHandler, analyticsHandler *handlers.AnalyticsHandler) {
+func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.AuthHandler, wsHandler *handlers.WorkspaceHandler, intHandler *handlers.IntegrationHandler, syncHandler *handlers.SyncHandler, videoHandler *handlers.VideoHandler, analyticsHandler *handlers.AnalyticsHandler, auditHandler *handlers.AuditHandler, snapshotHandler *handlers.AuditSnapshotHandler) {
 	api := app.Group("/api/" + cfg.App.APIVersion)
 
 	healthHandler := handlers.HealthCheck(cfg)
@@ -44,9 +44,11 @@ func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.Au
 	integrations.Post("/google/test", intHandler.TestConnection)
 	integrations.Get("/youtube/channels", intHandler.GetYouTubeChannels)
 
-	// YouTube Sync routes (require workspace)
+	// YouTube routes (require workspace)
 	yt := protected.Group("/youtube")
 	yt.Use(middleware.WorkspaceRequired())
+
+	// Sync routes
 	yt.Post("/sync", syncHandler.Sync)
 	yt.Get("/sync/status", syncHandler.SyncStatus)
 	yt.Get("/sync/history", syncHandler.SyncHistory)
@@ -61,4 +63,12 @@ func SetupAPIRoutes(app *fiber.App, cfg *config.Config, authHandler *handlers.Au
 	yt.Get("/analytics/summary", analyticsHandler.Summary)
 	yt.Get("/analytics/timeseries", analyticsHandler.Timeseries)
 	yt.Get("/analytics/top-videos", analyticsHandler.TopVideos)
+
+	// Audit routes
+	yt.Get("/audit/channel/:id", auditHandler.AuditChannel)
+	yt.Get("/audit/video/:id", auditHandler.AuditVideo)
+
+	// Snapshot routes (weekly audit comparison)
+	yt.Post("/audit/snapshot/:id", snapshotHandler.CreateSnapshot)
+	yt.Get("/audit/compare/:id", snapshotHandler.Compare)
 }

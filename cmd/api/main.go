@@ -80,6 +80,12 @@ func main() {
 	videoHandler := handlers.NewVideoHandler(channelRepo, syncRepo)
 	analyticsReadService := service.NewAnalyticsReadService(channelRepo, syncRepo)
 	analyticsHandler := handlers.NewAnalyticsHandler(analyticsReadService)
+		auditRepo := repository.NewAuditRepository(db)
+	auditService := service.NewAuditService(auditRepo, channelRepo)
+	auditHandler := handlers.NewAuditHandler(auditService)
+	snapshotRepo := repository.NewAuditSnapshotRepository(db)
+	snapshotService := service.NewAuditSnapshotService(snapshotRepo, auditService)
+	snapshotHandler := handlers.NewAuditSnapshotHandler(snapshotService)
 
 	app := fiber.New(fiber.Config{
 		AppName:      cfg.App.Name,
@@ -97,7 +103,7 @@ func main() {
 	app.Use(middleware.APIVersion(cfg.App.APIVersion))
 
 	app.Get("/health", handlers.HealthCheck(cfg))
-	routes.SetupAPIRoutes(app, cfg, authHandler, wsHandler, intHandler, syncHandler, videoHandler, analyticsHandler)
+	routes.SetupAPIRoutes(app, cfg, authHandler, wsHandler, intHandler, syncHandler, videoHandler, analyticsHandler, auditHandler, snapshotHandler)
 	routes.SetupAnalyticsRoutes(app, cfg, syncHandler)
 
 	app.Use(middleware.NotFound())
